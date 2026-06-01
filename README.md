@@ -2,7 +2,7 @@
 
 > Algoritmo criptográfico simétrico de cifrado por bloques basado en transformaciones matriciales, con autenticación HMAC-SHA256 y transmisión segura por red TCP.
 
-**Trabajo de Fase — Criptografía · Cisco Networking Academy · 2025**  
+**Trabajo de Fase — Criptografía**  
 Universidad Católica de Santa María — Arequipa, Perú
 
 | Autor | Correo |
