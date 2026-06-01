@@ -305,7 +305,3 @@ Las pruebas cubren:
 > MCE es un algoritmo **académico**. No ha sido sometido a análisis diferencial y lineal formal. Para uso en producción se recomienda AES-256-GCM.
 
 ---
-
-## 📄 Licencia
-
-Trabajo académico — Universidad Católica de Santa María · 2025.
