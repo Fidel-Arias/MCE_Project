@@ -1,0 +1,1381 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>SecureVault — Cifrado MCE</title>
+<script src="https://cdn.tailwindcss.com">
+// ── ESTADO RED
+const net = { keyB64Srv: '', keyB64Cli: '', fileNet: null };
+let logInterval = null;
+const ALL_TABS = ['encrypt','decrypt','about','network'];
+
+function switchTab(tab) {
+  ALL_TABS.forEach(t => {
+    document.getElementById('panel-'+t).classList.add('hidden');
+    const btn = document.getElementById('tab-'+t);
+    if (btn) btn.className = btn.className.replace('tab-active','tab-inactive');
+  });
+  document.getElementById('panel-'+tab).classList.remove('hidden');
+  const active = document.getElementById('tab-'+tab);
+  if (active) active.className = active.className.replace('tab-inactive','tab-active');
+  if (tab === 'network') startLogPolling();
+  else stopLogPolling();
+}
+
+function loadSrvKey(input) {
+  const file = input.files[0]; if (!file) return;
+  const r = new FileReader();
+  r.onload = e => {
+    net.keyB64Srv = arrayBufferToB64(e.target.result);
+    document.getElementById('srv-key-text').textContent = file.name + ' (' + file.size + 'B)';
+    document.getElementById('srv-key-status').classList.remove('hidden');
+  };
+  r.readAsArrayBuffer(file);
+}
+
+function loadCliKey(input) {
+  const file = input.files[0]; if (!file) return;
+  const r = new FileReader();
+  r.onload = e => {
+    net.keyB64Cli = arrayBufferToB64(e.target.result);
+    document.getElementById('cli-key-text').textContent = file.name + ' (' + file.size + 'B)';
+    document.getElementById('cli-key-status').classList.remove('hidden');
+  };
+  r.readAsArrayBuffer(file);
+}
+
+function showFileNet(input) {
+  const f = input.files[0]; if (!f) return;
+  net.fileNet = f;
+  document.getElementById('file-net-name').textContent = f.name;
+  document.getElementById('file-net-size').textContent = humanSize(f.size);
+  document.getElementById('file-net-icon').textContent = fileIcon(f.name);
+  document.getElementById('file-net-info').classList.remove('hidden');
+  document.getElementById('drop-net').classList.add('hidden');
+}
+
+function clearFileNet() {
+  net.fileNet = null;
+  document.getElementById('file-net-info').classList.add('hidden');
+  document.getElementById('drop-net').classList.remove('hidden');
+  document.getElementById('file-net').value = '';
+}
+
+async function startServer() {
+  const password = document.getElementById('srv-password').value.trim();
+  const port     = document.getElementById('srv-port').value;
+  if (!net.keyB64Srv) return showAlert('Carga el archivo de clave del servidor.');
+  if (!password)      return showAlert('Ingresa la contrasena del servidor.');
+  document.getElementById('start-icon').innerHTML = '<div class="spinner"></div>';
+  document.getElementById('start-text').textContent = 'Iniciando...';
+  const res  = await fetch('/api/net/start_server', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ password, key_b64: net.keyB64Srv, port })
+  });
+  const data = await res.json();
+  if (data.ok) {
+    document.getElementById('srv-info').classList.remove('hidden');
+    document.getElementById('srv-ip-display').textContent   = data.ip;
+    document.getElementById('srv-port-display').textContent = data.port;
+    document.getElementById('btn-start-srv').disabled = true;
+    document.getElementById('btn-stop-srv').disabled  = false;
+    document.getElementById('btn-stop-srv').classList.remove('opacity-40');
+    document.getElementById('srv-running-badge').classList.remove('hidden');
+    document.getElementById('start-icon').textContent = 'V';
+    document.getElementById('start-text').textContent = 'Servidor corriendo';
+    startLogPolling();
+  } else {
+    showAlert(data.error);
+    document.getElementById('start-icon').textContent = 'P';
+    document.getElementById('start-text').textContent = 'Iniciar Servidor';
+  }
+}
+
+async function stopServer() {
+  await fetch('/api/net/stop_server', { method: 'POST' });
+  document.getElementById('btn-start-srv').disabled = false;
+  document.getElementById('btn-stop-srv').disabled  = true;
+  document.getElementById('btn-stop-srv').classList.add('opacity-40');
+  document.getElementById('srv-running-badge').classList.add('hidden');
+  document.getElementById('srv-info').classList.add('hidden');
+  document.getElementById('start-text').textContent = 'Iniciar Servidor';
+  stopLogPolling();
+}
+
+function startLogPolling() {
+  if (logInterval) return;
+  logInterval = setInterval(pollLog, 2000);
+  pollLog();
+}
+function stopLogPolling() {
+  if (logInterval) { clearInterval(logInterval); logInterval = null; }
+}
+
+async function pollLog() {
+  try {
+    const res  = await fetch('/api/net/server_log');
+    const data = await res.json();
+    if (!data.ok) return;
+    const logEl = document.getElementById('srv-log');
+    if (data.log.length > 0) {
+      logEl.innerHTML = data.log.slice().reverse().map(line => {
+        let cls = 'text-slate-400';
+        if (line.includes('OK') || line.includes('guardado')) cls = 'text-emerald-300';
+        else if (line.includes('Error') || line.includes('ERROR')) cls = 'text-red-400';
+        else if (line.includes('entrante') || line.includes('RECV')) cls = 'text-cyan-300';
+        return '<div class="log-entry ' + cls + '">' + line + '</div>';
+      }).join('');
+    }
+    const filesEl = document.getElementById('received-files');
+    if (data.files.length > 0) {
+      filesEl.innerHTML = data.files.map(f =>
+        '<div class="flex items-center gap-3 bg-white/5 rounded-lg px-3 py-2">' +
+        '<span class="text-lg">' + fileIcon(f.name) + '</span>' +
+        '<div class="flex-1 min-w-0">' +
+        '<p class="text-sm font-medium truncate">' + f.name + '</p>' +
+        '<p class="text-xs text-slate-400">' + f.size + '</p></div>' +
+        '<a href="/api/net/download_received/' + encodeURIComponent(f.name) + '" ' +
+        'class="text-xs bg-violet-600/40 hover:bg-violet-600/60 px-3 py-1 rounded-lg transition-all">Descargar</a>' +
+        '</div>'
+      ).join('');
+    } else {
+      filesEl.innerHTML = '<p class="text-xs text-slate-600 italic">Ningun archivo recibido aun...</p>';
+    }
+  } catch(e) {}
+}
+
+async function sendFile() {
+  const host     = document.getElementById('cli-host').value.trim();
+  const port     = document.getElementById('cli-port').value;
+  const password = document.getElementById('cli-password').value.trim();
+  if (!host)          return showAlert('Ingresa la IP o host del servidor.');
+  if (!net.keyB64Cli) return showAlert('Carga el archivo de clave del cliente.');
+  if (!password)      return showAlert('Ingresa la contrasena.');
+  if (!net.fileNet)   return showAlert('Selecciona un archivo para enviar.');
+
+  document.getElementById('btn-send').disabled = true;
+  document.getElementById('send-icon').innerHTML = '<div class="spinner"></div>';
+  document.getElementById('send-text').textContent = 'Cifrando y enviando...';
+  document.getElementById('send-result').classList.add('hidden');
+
+  const form = new FormData();
+  form.append('file',     net.fileNet);
+  form.append('host',     host);
+  form.append('port',     port);
+  form.append('password', password);
+  form.append('key_b64',  net.keyB64Cli);
+
+  try {
+    const res  = await fetch('/api/net/send_file', { method: 'POST', body: form });
+    const data = await res.json();
+    const panel = document.getElementById('send-result');
+    panel.classList.remove('hidden');
+    if (data.ok) {
+      document.getElementById('send-result-icon').textContent  = 'OK';
+      document.getElementById('send-result-title').textContent = 'Archivo enviado exitosamente';
+      document.getElementById('send-result-title').className   = 'font-semibold mb-1 text-emerald-300';
+      document.getElementById('send-result-body').innerHTML    =
+        '<p>Guardado como: <span class="text-violet-300">' + data.saved_as + '</span></p>' +
+        '<p>Original: ' + data.orig_size + ' | Cifrado: ' + data.enc_size + '</p>' +
+        '<p>Cifrado: ' + data.enc_ms + ' ms | Envio: ' + data.send_ms + ' ms</p>';
+      addLog('Archivo enviado a ' + host + ':' + port + ' -> ' + data.saved_as, 'cyan');
+    } else {
+      document.getElementById('send-result-icon').textContent  = 'X';
+      document.getElementById('send-result-title').textContent = 'Error al enviar';
+      document.getElementById('send-result-title').className   = 'font-semibold mb-1 text-red-400';
+      document.getElementById('send-result-body').innerHTML    = '<p class="text-red-300">' + data.error + '</p>';
+    }
+  } catch(e) {
+    document.getElementById('send-result').classList.remove('hidden');
+    document.getElementById('send-result-icon').textContent  = 'X';
+    document.getElementById('send-result-title').textContent = 'Error de conexion';
+    document.getElementById('send-result-body').innerHTML    = '<p class="text-red-300">' + e.message + '</p>';
+  }
+  document.getElementById('btn-send').disabled = false;
+  document.getElementById('send-icon').textContent = 'Send';
+  document.getElementById('send-text').textContent = 'Cifrar y Enviar';
+}
+
+</script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
+  * { font-family: 'Inter', sans-serif; }
+  .mono { font-family: 'JetBrains Mono', monospace; }
+
+  .gradient-bg {
+    background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 50%, #0f172a 100%);
+  }
+  .card-glass {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.1);
+    backdrop-filter: blur(12px);
+  }
+  .card-glass:hover {
+    border-color: rgba(139,92,246,0.4);
+    transition: all 0.3s ease;
+  }
+  .btn-primary {
+    background: linear-gradient(135deg, #7c3aed, #4f46e5);
+    transition: all 0.2s ease;
+  }
+  .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 8px 25px rgba(124,58,237,0.4); }
+  .btn-primary:active { transform: translateY(0); }
+
+  .btn-secondary {
+    background: linear-gradient(135deg, #059669, #0891b2);
+    transition: all 0.2s ease;
+  }
+  .btn-secondary:hover { transform: translateY(-1px); box-shadow: 0 8px 25px rgba(5,150,105,0.4); }
+
+  .drop-zone {
+    border: 2px dashed rgba(139,92,246,0.4);
+    transition: all 0.3s ease;
+  }
+  .drop-zone.dragover {
+    border-color: #7c3aed;
+    background: rgba(124,58,237,0.1);
+  }
+  .drop-zone:hover { border-color: rgba(139,92,246,0.7); }
+
+  .metric-card {
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 12px;
+  }
+  .progress-bar {
+    background: linear-gradient(90deg, #7c3aed, #06b6d4);
+    border-radius: 4px;
+    transition: width 1s ease;
+  }
+  .tab-active {
+    background: rgba(124,58,237,0.2);
+    border-bottom: 2px solid #7c3aed;
+    color: #a78bfa;
+  }
+  .tab-inactive { color: #64748b; }
+  .tab-inactive:hover { color: #94a3b8; }
+
+  .log-entry { animation: fadeSlide 0.3s ease; }
+  @keyframes fadeSlide {
+    from { opacity:0; transform:translateY(-4px); }
+    to   { opacity:1; transform:translateY(0); }
+  }
+  .spinner {
+    border: 3px solid rgba(255,255,255,0.1);
+    border-top-color: #7c3aed;
+    border-radius: 50%;
+    width: 20px; height: 20px;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .pulse-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #10b981;
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0%,100% { opacity:1; transform:scale(1); }
+    50%      { opacity:0.5; transform:scale(1.3); }
+  }
+</style>
+</head>
+<body class="gradient-bg min-h-screen text-white">
+
+<!-- ── NAVBAR ─────────────────────────────────────── -->
+<nav class="border-b border-white/10 px-6 py-4">
+  <div class="max-w-6xl mx-auto flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-violet-600 to-indigo-600 flex items-center justify-center text-lg font-bold">S</div>
+      <div>
+        <span class="font-bold text-lg tracking-tight">SecureVault</span>
+        <span class="text-xs text-violet-400 ml-2 mono">MCE v2.0</span>
+      </div>
+    </div>
+    <div class="flex items-center gap-4 text-sm">
+      <div class="flex items-center gap-2">
+        <div class="pulse-dot"></div>
+        <span class="text-emerald-400 text-xs font-medium">Sistema activo</span>
+      </div>
+      <div class="card-glass px-3 py-1.5 rounded-lg text-xs mono text-violet-300">
+        Matricial Cipher Engine
+      </div>
+    </div>
+  </div>
+</nav>
+
+<!-- ── HERO ───────────────────────────────────────── -->
+<div class="max-w-6xl mx-auto px-6 pt-12 pb-6">
+  <div class="text-center mb-10">
+    <div class="inline-flex items-center gap-2 bg-violet-900/30 border border-violet-500/30 rounded-full px-4 py-1.5 text-xs text-violet-300 mb-4 mono">
+      🔐 Cifrado por bloques matriciales · 5 rondas · HMAC-SHA256
+    </div>
+    <h1 class="text-4xl font-bold mb-3 bg-gradient-to-r from-white via-violet-200 to-indigo-300 bg-clip-text text-transparent">
+      Protege tus archivos con MCE
+    </h1>
+    <p class="text-slate-400 max-w-xl mx-auto text-sm leading-relaxed">
+      Algoritmo criptográfico propio basado en transformaciones matriciales, modo CBC y verificación de integridad HMAC. Cifrado simétrico con doble clave.
+    </p>
+  </div>
+
+  <!-- ── TABS ──────────────────────────────────────── -->
+  <div class="flex gap-1 mb-6 border-b border-white/10">
+    <button onclick="switchTab('encrypt')" id="tab-encrypt"
+      class="tab-active px-5 py-3 text-sm font-medium rounded-t-lg transition-all">
+      🔒 Cifrar archivo
+    </button>
+    <button onclick="switchTab('decrypt')" id="tab-decrypt"
+      class="tab-inactive px-5 py-3 text-sm font-medium rounded-t-lg transition-all">
+      🔓 Descifrar archivo
+    </button>
+    <button onclick="switchTab('about')" id="tab-about"
+      class="tab-inactive px-5 py-3 text-sm font-medium rounded-t-lg transition-all">
+      📐 Cómo funciona
+    </button>
+    <button onclick="switchTab('network')" id="tab-network"
+      class="tab-inactive px-5 py-3 text-sm font-medium rounded-t-lg transition-all">
+      🌐 Envío en Red
+    </button>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════
+       TAB: CIFRAR
+  ══════════════════════════════════════════════════ -->
+  <div id="panel-encrypt">
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+      <!-- Columna izquierda: formulario -->
+      <div class="lg:col-span-2 space-y-4">
+
+        <!-- Paso 1: Clave -->
+        <div class="card-glass rounded-2xl p-5">
+          <div class="flex items-center gap-2 mb-4">
+            <span class="w-6 h-6 rounded-full bg-violet-600 text-xs flex items-center justify-center font-bold">1</span>
+            <h3 class="font-semibold text-sm">Archivo de clave (.mce.key)</h3>
+          </div>
+          <div class="flex gap-3">
+            <button onclick="generateKey()" id="btn-genkey"
+              class="btn-primary text-white text-sm font-medium px-4 py-2.5 rounded-xl flex items-center gap-2">
+              <span id="genkey-icon">⚙️</span> Generar nueva clave
+            </button>
+            <label class="flex items-center gap-2 card-glass px-4 py-2.5 rounded-xl text-sm cursor-pointer hover:border-violet-500/50 transition-all">
+              📂 Cargar clave existente
+              <input type="file" id="keyfile-input-enc" accept=".key,.mce.key" class="hidden" onchange="loadKeyfileEnc(this)"/>
+            </label>
+          </div>
+          <div id="key-status-enc" class="mt-3 hidden">
+            <div class="flex items-center gap-2 bg-emerald-900/30 border border-emerald-500/30 rounded-lg px-3 py-2 text-xs text-emerald-300">
+              <span>✅</span>
+              <span id="key-status-enc-text">Clave cargada</span>
+            </div>
+          </div>
+          <input type="hidden" id="key-b64-enc"/>
+        </div>
+
+        <!-- Paso 2: Contraseña -->
+        <div class="card-glass rounded-2xl p-5">
+          <div class="flex items-center gap-2 mb-4">
+            <span class="w-6 h-6 rounded-full bg-violet-600 text-xs flex items-center justify-center font-bold">2</span>
+            <h3 class="font-semibold text-sm">Contraseña de cifrado</h3>
+          </div>
+          <div class="relative">
+            <input type="password" id="password-enc" placeholder="Ingresa tu contraseña..."
+              class="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-violet-500 transition-all pr-12"/>
+            <button onclick="togglePass('password-enc')" class="absolute right-3 top-3 text-slate-400 hover:text-white text-lg">👁</button>
+          </div>
+          <div id="pass-strength" class="mt-2 h-1 rounded-full bg-white/10 overflow-hidden hidden">
+            <div id="pass-bar" class="h-full rounded-full transition-all duration-500"></div>
+          </div>
+          <p id="pass-hint" class="text-xs text-slate-500 mt-1 hidden"></p>
+        </div>
+
+        <!-- Paso 3: Archivo -->
+        <div class="card-glass rounded-2xl p-5">
+          <div class="flex items-center gap-2 mb-4">
+            <span class="w-6 h-6 rounded-full bg-violet-600 text-xs flex items-center justify-center font-bold">3</span>
+            <h3 class="font-semibold text-sm">Archivo a cifrar</h3>
+          </div>
+          <div id="drop-enc" class="drop-zone rounded-xl p-8 text-center cursor-pointer"
+            onclick="document.getElementById('file-enc').click()"
+            ondragover="handleDrag(event,'drop-enc')"
+            ondragleave="removeDrag('drop-enc')"
+            ondrop="handleDrop(event,'file-enc','drop-enc')">
+            <div class="text-3xl mb-2">📄</div>
+            <p class="text-sm text-slate-400">Arrastra tu archivo aquí o <span class="text-violet-400 underline">haz clic</span></p>
+            <p class="text-xs text-slate-600 mt-1">Máximo 10 MB · Cualquier tipo de archivo</p>
+            <input type="file" id="file-enc" class="hidden" onchange="showFileEnc(this)"/>
+          </div>
+          <div id="file-enc-info" class="mt-3 hidden">
+            <div class="flex items-center gap-3 bg-white/5 rounded-lg px-3 py-2">
+              <span class="text-xl" id="file-enc-icon">📄</span>
+              <div class="flex-1 min-w-0">
+                <p class="text-sm font-medium truncate" id="file-enc-name"></p>
+                <p class="text-xs text-slate-400" id="file-enc-size"></p>
+              </div>
+              <button onclick="clearFile('enc')" class="text-slate-500 hover:text-red-400 text-lg">✕</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Botón cifrar -->
+        <button onclick="doEncrypt()" id="btn-encrypt"
+          class="btn-primary w-full py-4 rounded-2xl font-semibold text-sm flex items-center justify-center gap-3">
+          <span id="enc-btn-icon">🔒</span>
+          <span id="enc-btn-text">Cifrar archivo</span>
+        </button>
+      </div>
+
+      <!-- Columna derecha: métricas + log -->
+      <div class="space-y-4">
+
+        <!-- Métricas -->
+        <div class="card-glass rounded-2xl p-5">
+          <h3 class="font-semibold text-sm mb-4 flex items-center gap-2">
+            📊 <span>Métricas del cifrado</span>
+          </h3>
+          <div class="space-y-4">
+
+            <div class="metric-card p-3">
+              <div class="flex justify-between text-xs mb-1">
+                <span class="text-slate-400">Entropía</span>
+                <span class="mono text-violet-300" id="m-entropy">—</span>
+              </div>
+              <div class="h-1.5 bg-white/10 rounded-full overflow-hidden">
+                <div class="progress-bar h-full" id="bar-entropy" style="width:0%"></div>
+              </div>
+              <p class="text-xs text-slate-600 mt-1">Máximo teórico: 8.0 bits/byte</p>
+            </div>
+
+            <div class="metric-card p-3">
+              <div class="flex justify-between text-xs mb-1">
+                <span class="text-slate-400">Efecto avalancha</span>
+                <span class="mono text-cyan-300" id="m-avalanche">—</span>
+              </div>
+              <div class="h-1.5 bg-white/10 rounded-full overflow-hidden">
+                <div class="h-full rounded-full transition-all duration-700" id="bar-avalanche"
+                  style="width:0%; background:linear-gradient(90deg,#06b6d4,#10b981)"></div>
+              </div>
+              <p class="text-xs text-slate-600 mt-1">Meta: &gt;50% bytes distintos</p>
+            </div>
+
+            <div class="grid grid-cols-2 gap-2 text-xs">
+              <div class="metric-card p-3">
+                <p class="text-slate-400 mb-1">Tiempo</p>
+                <p class="font-semibold mono text-yellow-300" id="m-time">—</p>
+              </div>
+              <div class="metric-card p-3">
+                <p class="text-slate-400 mb-1">Bloques</p>
+                <p class="font-semibold mono text-orange-300" id="m-blocks">—</p>
+              </div>
+              <div class="metric-card p-3">
+                <p class="text-slate-400 mb-1">Original</p>
+                <p class="font-semibold mono text-slate-300" id="m-orig">—</p>
+              </div>
+              <div class="metric-card p-3">
+                <p class="text-slate-400 mb-1">Cifrado</p>
+                <p class="font-semibold mono text-slate-300" id="m-cipher">—</p>
+              </div>
+            </div>
+
+            <div id="algo-badge" class="hidden bg-violet-900/30 border border-violet-500/30 rounded-lg px-3 py-2 text-xs mono text-violet-300 text-center"></div>
+          </div>
+        </div>
+
+        <!-- Log de actividad -->
+        <div class="card-glass rounded-2xl p-5">
+          <h3 class="font-semibold text-sm mb-3 flex items-center gap-2">
+            📋 <span>Log de actividad</span>
+          </h3>
+          <div id="activity-log" class="space-y-2 max-h-52 overflow-y-auto">
+            <p class="text-xs text-slate-600 italic">Sin actividad aún...</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════
+       TAB: DESCIFRAR
+  ══════════════════════════════════════════════════ -->
+  <div id="panel-decrypt" class="hidden">
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+      <div class="space-y-4">
+        <!-- Clave -->
+        <div class="card-glass rounded-2xl p-5">
+          <h3 class="font-semibold text-sm mb-4">📂 Archivo de clave</h3>
+          <label class="flex items-center gap-2 card-glass px-4 py-3 rounded-xl text-sm cursor-pointer hover:border-violet-500/50 transition-all w-full justify-center">
+            🔑 Cargar archivo .mce.key
+            <input type="file" id="keyfile-input-dec" accept=".key,.mce.key" class="hidden" onchange="loadKeyfileDec(this)"/>
+          </label>
+          <div id="key-status-dec" class="mt-3 hidden">
+            <div class="flex items-center gap-2 bg-emerald-900/30 border border-emerald-500/30 rounded-lg px-3 py-2 text-xs text-emerald-300">
+              <span>✅</span>
+              <span id="key-status-dec-text">Clave cargada</span>
+            </div>
+          </div>
+          <input type="hidden" id="key-b64-dec"/>
+        </div>
+
+        <!-- Contraseña -->
+        <div class="card-glass rounded-2xl p-5">
+          <h3 class="font-semibold text-sm mb-4">🔑 Contraseña</h3>
+          <div class="relative">
+            <input type="password" id="password-dec" placeholder="Contraseña usada al cifrar..."
+              class="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-violet-500 transition-all pr-12"/>
+            <button onclick="togglePass('password-dec')" class="absolute right-3 top-3 text-slate-400 hover:text-white text-lg">👁</button>
+          </div>
+        </div>
+
+        <!-- Archivo .mce -->
+        <div class="card-glass rounded-2xl p-5">
+          <h3 class="font-semibold text-sm mb-4">📦 Archivo cifrado (.mce)</h3>
+          <div id="drop-dec" class="drop-zone rounded-xl p-8 text-center cursor-pointer"
+            onclick="document.getElementById('file-dec').click()"
+            ondragover="handleDrag(event,'drop-dec')"
+            ondragleave="removeDrag('drop-dec')"
+            ondrop="handleDrop(event,'file-dec','drop-dec')">
+            <div class="text-3xl mb-2">🔐</div>
+            <p class="text-sm text-slate-400">Arrastra el archivo <span class="mono text-violet-400">.mce</span> aquí</p>
+            <input type="file" id="file-dec" class="hidden" accept=".mce" onchange="showFileDec(this)"/>
+          </div>
+          <div id="file-dec-info" class="mt-3 hidden">
+            <div class="flex items-center gap-3 bg-white/5 rounded-lg px-3 py-2">
+              <span class="text-xl">🔐</span>
+              <div class="flex-1 min-w-0">
+                <p class="text-sm font-medium truncate" id="file-dec-name"></p>
+                <p class="text-xs text-slate-400" id="file-dec-size"></p>
+              </div>
+              <button onclick="clearFile('dec')" class="text-slate-500 hover:text-red-400 text-lg">✕</button>
+            </div>
+          </div>
+        </div>
+
+        <button onclick="doDecrypt()" id="btn-decrypt"
+          class="btn-secondary w-full py-4 rounded-2xl font-semibold text-sm flex items-center justify-center gap-3">
+          <span id="dec-btn-icon">🔓</span>
+          <span id="dec-btn-text">Descifrar archivo</span>
+        </button>
+      </div>
+
+      <!-- Resultado descifrado -->
+      <div class="card-glass rounded-2xl p-6 flex flex-col items-center justify-center min-h-64" id="dec-result-panel">
+        <div class="text-5xl mb-4 opacity-20">🔓</div>
+        <p class="text-slate-500 text-sm text-center">El archivo descifrado<br/>aparecerá aquí listo para descargar</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════
+       TAB: CÓMO FUNCIONA
+  ══════════════════════════════════════════════════ -->
+  <div id="panel-about" class="hidden">
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+
+      <!-- Flujo del algoritmo -->
+      <div class="card-glass rounded-2xl p-6">
+        <h3 class="font-semibold mb-5 flex items-center gap-2">📐 Flujo MCE por bloque (32 bytes)</h3>
+        <div class="space-y-3">
+          {% for step in [
+            ('1','Derivación de clave','SHA-256(password + keyfile) → 5 subclaves de 32B','violet'),
+            ('2','Conversión a matriz','32 bytes → matriz 4×8 de uint8','indigo'),
+            ('3','XOR con subclave','Cada byte ⊕ byte de subclave de la ronda','blue'),
+            ('4','Desplazamiento de filas','Fila i rota (i+1)×shift posiciones','cyan'),
+            ('5','Transformación modular','(byte + subclave) mod 256','teal'),
+            ('6','Transposición','Matriz 4×8 → transpuesta → reshape 4×8','emerald'),
+            ('7','×5 rondas','Repetir pasos 3-6 cinco veces','green'),
+            ('8','CBC + HMAC','Encadenar bloques + firma de integridad','yellow')
+          ] %}
+          <div class="flex gap-3 items-start">
+            <span class="w-7 h-7 rounded-lg bg-{{ step[3] }}-900/50 border border-{{ step[3] }}-500/30 text-{{ step[3] }}-300 text-xs flex items-center justify-center font-bold flex-shrink-0 mt-0.5">{{ step[0] }}</span>
+            <div>
+              <p class="text-sm font-medium text-{{ step[3] }}-200">{{ step[1] }}</p>
+              <p class="text-xs text-slate-400 mono">{{ step[2] }}</p>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+
+      <!-- Propiedades de seguridad -->
+      <div class="space-y-4">
+        <div class="card-glass rounded-2xl p-6">
+          <h3 class="font-semibold mb-4">🛡️ Propiedades de seguridad</h3>
+          <div class="space-y-3 text-sm">
+            {% for prop in [
+              ('Doble clave','Contraseña + archivo .key → mayor espacio de claves','✅'),
+              ('IV aleatorio','Mismo archivo + clave → cifrado diferente cada vez','✅'),
+              ('Modo CBC','Cada bloque depende del anterior (encadenamiento)','✅'),
+              ('HMAC-SHA256','Detecta corrupción y claves incorrectas antes de descifrar','✅'),
+              ('5 rondas','Difusión y confusión incrementales por ronda','✅'),
+              ('Padding PKCS7','Manejo correcto de archivos de cualquier tamaño','✅')
+            ] %}
+            <div class="flex items-start gap-3">
+              <span class="text-emerald-400 mt-0.5">{{ prop[2] }}</span>
+              <div>
+                <p class="font-medium text-white/90">{{ prop[0] }}</p>
+                <p class="text-xs text-slate-400">{{ prop[1] }}</p>
+              </div>
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+
+        <div class="card-glass rounded-2xl p-6">
+          <h3 class="font-semibold mb-4">📊 Parámetros del algoritmo</h3>
+          <table class="w-full text-xs">
+            <tbody class="space-y-2">
+              {% for row in [
+                ('Tamaño de bloque','32 bytes (256 bits)'),
+                ('Dimensión de matriz','4 × 8 × uint8'),
+                ('Rondas','5'),
+                ('Longitud de clave','Password + 256B keyfile'),
+                ('Derivación','SHA-256 por ronda'),
+                ('Modo','CBC (Cipher Block Chaining)'),
+                ('Integridad','HMAC-SHA256'),
+                ('Extensión de salida','.mce')
+              ] %}
+              <tr class="border-b border-white/5">
+                <td class="py-2 text-slate-400">{{ row[0] }}</td>
+                <td class="py-2 mono text-violet-300 text-right">{{ row[1] }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+  <!-- ══════════════════════════════════════════════════
+       TAB: ENVÍO EN RED
+  ══════════════════════════════════════════════════ -->
+  <div id="panel-network" class="hidden">
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+      <!-- ── SERVIDOR ─────────────────────────────────── -->
+      <div class="space-y-4">
+        <div class="card-glass rounded-2xl p-5">
+          <h3 class="font-semibold mb-1 flex items-center gap-2">🖥️ <span>Modo Servidor (Receptor)</span></h3>
+          <p class="text-xs text-slate-500 mb-4">Esta laptop recibe archivos cifrados de otros clientes en la red.</p>
+
+          <!-- Clave -->
+          <div class="mb-3">
+            <label class="text-xs text-slate-400 mb-1 block">Archivo de clave</label>
+            <label class="flex items-center gap-2 card-glass px-4 py-2.5 rounded-xl text-sm cursor-pointer w-full justify-center">
+              🔑 Cargar .mce.key
+              <input type="file" id="srv-keyfile" accept=".key,.mce.key" class="hidden" onchange="loadSrvKey(this)"/>
+            </label>
+            <div id="srv-key-status" class="mt-2 hidden">
+              <div class="bg-emerald-900/30 border border-emerald-500/30 rounded-lg px-3 py-1.5 text-xs text-emerald-300" id="srv-key-text"></div>
+            </div>
+            <input type="hidden" id="srv-key-b64"/>
+          </div>
+
+          <!-- Contraseña -->
+          <div class="mb-3">
+            <label class="text-xs text-slate-400 mb-1 block">Contraseña</label>
+            <input type="password" id="srv-password" placeholder="Contraseña acordada con el cliente..."
+              class="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-violet-500"/>
+          </div>
+
+          <!-- Puerto -->
+          <div class="mb-4">
+            <label class="text-xs text-slate-400 mb-1 block">Puerto</label>
+            <input type="number" id="srv-port" value="9999"
+              class="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-violet-500 mono"/>
+          </div>
+
+          <!-- Botones -->
+          <div class="flex gap-3">
+            <button onclick="startServer()" id="btn-start-srv"
+              class="btn-primary flex-1 py-3 rounded-xl text-sm font-semibold flex items-center justify-center gap-2">
+              <span id="start-icon">▶️</span> <span id="start-text">Iniciar Servidor</span>
+            </button>
+            <button onclick="stopServer()" id="btn-stop-srv" disabled
+              class="opacity-40 bg-red-600 flex-1 py-3 rounded-xl text-sm font-semibold">
+              ⏹️ Detener
+            </button>
+          </div>
+        </div>
+
+        <!-- IP Info -->
+        <div id="srv-info" class="hidden card-glass rounded-2xl p-5">
+          <p class="text-xs text-slate-400 mb-2">📡 Servidor activo — comparte esta info con el cliente:</p>
+          <div class="bg-black/30 rounded-xl p-3 mono text-sm">
+            <p class="text-slate-400 text-xs">IP local:</p>
+            <p class="text-violet-300 font-bold text-lg" id="srv-ip-display">—</p>
+            <p class="text-slate-400 text-xs mt-2">Puerto:</p>
+            <p class="text-cyan-300 font-bold" id="srv-port-display">—</p>
+          </div>
+          <p class="text-xs text-yellow-400/80 mt-3">⚠️ Si usas ngrok, ejecuta: <span class="mono bg-black/30 px-1 rounded">ngrok tcp 9999</span> y comparte esa URL al cliente.</p>
+        </div>
+
+        <!-- Log del servidor -->
+        <div class="card-glass rounded-2xl p-5">
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="font-semibold text-sm flex items-center gap-2">📋 <span>Log del servidor</span></h3>
+            <div id="srv-running-badge" class="hidden flex items-center gap-1.5">
+              <div class="pulse-dot"></div>
+              <span class="text-emerald-400 text-xs">Activo</span>
+            </div>
+          </div>
+          <div id="srv-log" class="space-y-1 max-h-48 overflow-y-auto font-mono text-xs text-slate-400">
+            <p class="italic text-slate-600">Sin actividad aún...</p>
+          </div>
+        </div>
+
+        <!-- Archivos recibidos -->
+        <div class="card-glass rounded-2xl p-5">
+          <h3 class="font-semibold text-sm mb-3">📥 Archivos recibidos</h3>
+          <div id="received-files" class="space-y-2">
+            <p class="text-xs text-slate-600 italic">Ningún archivo recibido aún...</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── CLIENTE ──────────────────────────────────── -->
+      <div class="space-y-4">
+        <div class="card-glass rounded-2xl p-5">
+          <h3 class="font-semibold mb-1 flex items-center gap-2">💻 <span>Modo Cliente (Emisor)</span></h3>
+          <p class="text-xs text-slate-500 mb-4">Cifra y envía un archivo al servidor remoto por la red.</p>
+
+          <!-- Host -->
+          <div class="mb-3">
+            <label class="text-xs text-slate-400 mb-1 block">IP o host del servidor</label>
+            <input type="text" id="cli-host" placeholder="192.168.1.X o 0.tcp.ngrok.io"
+              class="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-violet-500 mono"/>
+          </div>
+
+          <!-- Puerto cliente -->
+          <div class="mb-3">
+            <label class="text-xs text-slate-400 mb-1 block">Puerto</label>
+            <input type="number" id="cli-port" value="9999"
+              class="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-violet-500 mono"/>
+          </div>
+
+          <!-- Clave cliente -->
+          <div class="mb-3">
+            <label class="text-xs text-slate-400 mb-1 block">Archivo de clave (misma que el servidor)</label>
+            <label class="flex items-center gap-2 card-glass px-4 py-2.5 rounded-xl text-sm cursor-pointer w-full justify-center">
+              🔑 Cargar .mce.key
+              <input type="file" id="cli-keyfile" accept=".key,.mce.key" class="hidden" onchange="loadCliKey(this)"/>
+            </label>
+            <div id="cli-key-status" class="mt-2 hidden">
+              <div class="bg-emerald-900/30 border border-emerald-500/30 rounded-lg px-3 py-1.5 text-xs text-emerald-300" id="cli-key-text"></div>
+            </div>
+            <input type="hidden" id="cli-key-b64"/>
+          </div>
+
+          <!-- Contraseña cliente -->
+          <div class="mb-3">
+            <label class="text-xs text-slate-400 mb-1 block">Contraseña (misma que el servidor)</label>
+            <input type="password" id="cli-password" placeholder="Contraseña acordada con el servidor..."
+              class="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-violet-500"/>
+          </div>
+
+          <!-- Archivo a enviar -->
+          <div class="mb-4">
+            <label class="text-xs text-slate-400 mb-1 block">Archivo a enviar</label>
+            <div id="drop-net" class="drop-zone rounded-xl p-6 text-center cursor-pointer"
+              onclick="document.getElementById('file-net').click()"
+              ondragover="handleDrag(event,'drop-net')"
+              ondragleave="removeDrag('drop-net')"
+              ondrop="handleDrop(event,'file-net','drop-net')">
+              <div class="text-2xl mb-1">📤</div>
+              <p class="text-sm text-slate-400">Arrastra o <span class="text-violet-400 underline">selecciona</span> el archivo</p>
+              <input type="file" id="file-net" class="hidden" onchange="showFileNet(this)"/>
+            </div>
+            <div id="file-net-info" class="mt-2 hidden">
+              <div class="flex items-center gap-3 bg-white/5 rounded-lg px-3 py-2">
+                <span class="text-xl" id="file-net-icon">📄</span>
+                <div class="flex-1 min-w-0">
+                  <p class="text-sm font-medium truncate" id="file-net-name"></p>
+                  <p class="text-xs text-slate-400" id="file-net-size"></p>
+                </div>
+                <button onclick="clearFileNet()" class="text-slate-500 hover:text-red-400">✕</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Botón enviar -->
+          <button onclick="sendFile()" id="btn-send"
+            class="btn-primary w-full py-4 rounded-2xl font-semibold text-sm flex items-center justify-center gap-3">
+            <span id="send-icon">📤</span>
+            <span id="send-text">Cifrar y Enviar</span>
+          </button>
+        </div>
+
+        <!-- Resultado envío -->
+        <div id="send-result" class="hidden card-glass rounded-2xl p-6 text-center">
+          <div class="text-4xl mb-3" id="send-result-icon"></div>
+          <p class="font-semibold mb-1" id="send-result-title"></p>
+          <div id="send-result-body" class="text-xs text-slate-400 space-y-1 mono"></div>
+        </div>
+
+        <!-- Diagrama de flujo -->
+        <div class="card-glass rounded-2xl p-5">
+          <h3 class="font-semibold text-sm mb-3">🔄 Flujo de transmisión</h3>
+          <div class="space-y-2 text-xs">
+            <div class="flex items-center gap-2">
+              <span class="w-6 h-6 rounded-full bg-violet-600/50 flex items-center justify-center text-xs">1</span>
+              <span class="text-slate-300">Archivo original seleccionado en el cliente</span>
+            </div>
+            <div class="flex items-center gap-2 pl-3 text-slate-600">↓ MCE cifra con password + keyfile</div>
+            <div class="flex items-center gap-2">
+              <span class="w-6 h-6 rounded-full bg-indigo-600/50 flex items-center justify-center text-xs">2</span>
+              <span class="text-slate-300">Bytes cifrados viajan por TCP/IP</span>
+            </div>
+            <div class="flex items-center gap-2 pl-3 text-slate-600">↓ Solo datos ilegibles en la red</div>
+            <div class="flex items-center gap-2">
+              <span class="w-6 h-6 rounded-full bg-emerald-600/50 flex items-center justify-center text-xs">3</span>
+              <span class="text-slate-300">Servidor descifra y guarda en recibidos/</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<!-- ── FOOTER ──────────────────────────────────────── -->
+<footer class="border-t border-white/10 mt-12 py-6 text-center text-xs text-slate-600">
+  SecureVault · MCE v2.0 · Trabajo de Fase — Criptografía · Cisco Networking Academy
+</footer>
+
+<!-- ── JAVASCRIPT ──────────────────────────────────── -->
+<script>
+// ── Estado global ──────────────────────────────────
+const state = {
+  keyB64Enc : '',
+  keyB64Dec : '',
+  fileEnc   : null,
+  fileDec   : null,
+};
+
+// ── Tabs ───────────────────────────────────────────
+function switchTab(tab) {
+  ['encrypt','decrypt','about'].forEach(t => {
+    document.getElementById('panel-'+t).classList.add('hidden');
+    const btn = document.getElementById('tab-'+t);
+    btn.className = btn.className.replace('tab-active','tab-inactive');
+  });
+  document.getElementById('panel-'+tab).classList.remove('hidden');
+  const active = document.getElementById('tab-'+tab);
+  active.className = active.className.replace('tab-inactive','tab-active');
+}
+
+// ── Generar clave ──────────────────────────────────
+async function generateKey() {
+  const btn = document.getElementById('btn-genkey');
+  btn.disabled = true;
+  document.getElementById('genkey-icon').textContent = '⏳';
+
+  const res  = await fetch('/api/genkey', { method:'POST' });
+  const data = await res.json();
+
+  if (data.ok) {
+    state.keyB64Enc = data.key_b64;
+    document.getElementById('key-b64-enc').value = data.key_b64;
+
+    // Descargar el archivo de clave
+    downloadB64(data.key_b64, data.filename, 'application/octet-stream');
+
+    showKeyStatus('enc', `Clave generada y descargada: ${data.filename} (${data.size} bytes)`);
+    addLog('🔑 Clave generada: ' + data.filename, 'violet');
+  }
+
+  document.getElementById('genkey-icon').textContent = '⚙️';
+  btn.disabled = false;
+}
+
+// ── Cargar keyfile para cifrar ─────────────────────
+function loadKeyfileEnc(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    const b64 = arrayBufferToB64(e.target.result);
+    state.keyB64Enc = b64;
+    document.getElementById('key-b64-enc').value = b64;
+    showKeyStatus('enc', `Clave cargada: ${file.name} (${file.size} bytes)`);
+    addLog('📂 Clave cargada: ' + file.name, 'cyan');
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function loadKeyfileDec(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    const b64 = arrayBufferToB64(e.target.result);
+    state.keyB64Dec = b64;
+    document.getElementById('key-b64-dec').value = b64;
+    showKeyStatus('dec', `Clave cargada: ${file.name} (${file.size} bytes)`);
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function showKeyStatus(side, msg) {
+  const el = document.getElementById('key-status-' + side);
+  document.getElementById('key-status-' + side + '-text').textContent = msg;
+  el.classList.remove('hidden');
+}
+
+// ── Mostrar archivo seleccionado ───────────────────
+function showFileEnc(input) {
+  const f = input.files[0];
+  if (!f) return;
+  state.fileEnc = f;
+  document.getElementById('file-enc-name').textContent = f.name;
+  document.getElementById('file-enc-size').textContent = humanSize(f.size);
+  document.getElementById('file-enc-icon').textContent = fileIcon(f.name);
+  document.getElementById('file-enc-info').classList.remove('hidden');
+  document.getElementById('drop-enc').classList.add('hidden');
+}
+
+function showFileDec(input) {
+  const f = input.files[0];
+  if (!f) return;
+  state.fileDec = f;
+  document.getElementById('file-dec-name').textContent = f.name;
+  document.getElementById('file-dec-size').textContent = humanSize(f.size);
+  document.getElementById('file-dec-info').classList.remove('hidden');
+  document.getElementById('drop-dec').classList.add('hidden');
+}
+
+function clearFile(side) {
+  if (side === 'enc') {
+    state.fileEnc = null;
+    document.getElementById('file-enc-info').classList.add('hidden');
+    document.getElementById('drop-enc').classList.remove('hidden');
+    document.getElementById('file-enc').value = '';
+  } else {
+    state.fileDec = null;
+    document.getElementById('file-dec-info').classList.add('hidden');
+    document.getElementById('drop-dec').classList.remove('hidden');
+    document.getElementById('file-dec').value = '';
+  }
+}
+
+// ── Drag & Drop ────────────────────────────────────
+function handleDrag(e, id) {
+  e.preventDefault();
+  document.getElementById(id).classList.add('dragover');
+}
+function removeDrag(id) {
+  document.getElementById(id).classList.remove('dragover');
+}
+function handleDrop(e, inputId, dropId) {
+  e.preventDefault();
+  removeDrag(dropId);
+  const file = e.dataTransfer.files[0];
+  if (!file) return;
+  const input = document.getElementById(inputId);
+  const dt    = new DataTransfer();
+  dt.items.add(file);
+  input.files = dt.files;
+  input.dispatchEvent(new Event('change'));
+}
+
+// ── Fuerza de contraseña ───────────────────────────
+document.getElementById('password-enc').addEventListener('input', function() {
+  const v = this.value;
+  const bar  = document.getElementById('pass-bar');
+  const hint = document.getElementById('pass-hint');
+  document.getElementById('pass-strength').classList.remove('hidden');
+  hint.classList.remove('hidden');
+  let score = 0;
+  if (v.length >= 8)  score++;
+  if (v.length >= 12) score++;
+  if (/[A-Z]/.test(v)) score++;
+  if (/[0-9]/.test(v)) score++;
+  if (/[^A-Za-z0-9]/.test(v)) score++;
+  const colors = ['bg-red-500','bg-orange-500','bg-yellow-500','bg-lime-500','bg-emerald-500'];
+  const labels = ['Muy débil','Débil','Regular','Fuerte','Muy fuerte'];
+  bar.className = 'h-full rounded-full transition-all duration-500 ' + (colors[score-1] || 'bg-red-500');
+  bar.style.width = (score * 20) + '%';
+  hint.textContent = labels[score-1] || 'Muy débil';
+});
+
+// ── CIFRAR ─────────────────────────────────────────
+async function doEncrypt() {
+  const password = document.getElementById('password-enc').value.trim();
+  const keyB64   = state.keyB64Enc;
+  const file     = state.fileEnc;
+
+  if (!keyB64)   return showAlert('Genera o carga un archivo de clave primero.');
+  if (!password) return showAlert('Ingresa una contraseña.');
+  if (!file)     return showAlert('Selecciona un archivo para cifrar.');
+
+  setBtnLoading('encrypt', true);
+  addLog(`🔒 Cifrando: ${file.name} (${humanSize(file.size)})`, 'violet');
+
+  const form = new FormData();
+  form.append('file', file);
+  form.append('password', password);
+  form.append('key_b64', keyB64);
+
+  try {
+    const res  = await fetch('/api/encrypt', { method:'POST', body:form });
+    const data = await res.json();
+
+    if (data.ok) {
+      updateMetrics(data);
+      downloadB64(data.cipher_b64, data.filename, 'application/octet-stream');
+      addLog(`✅ Cifrado exitoso → ${data.filename} (${data.time_ms} ms)`, 'emerald');
+      addLog(`   📊 Entropía: ${data.entropy} bits | Avalancha: ${data.avalanche_pct}%`, 'cyan');
+    } else {
+      addLog('❌ Error: ' + data.error, 'red');
+      showAlert(data.error);
+    }
+  } catch(e) {
+    addLog('❌ Error de red: ' + e.message, 'red');
+  }
+
+  setBtnLoading('encrypt', false);
+}
+
+// ── DESCIFRAR ──────────────────────────────────────
+async function doDecrypt() {
+  const password = document.getElementById('password-dec').value.trim();
+  const keyB64   = state.keyB64Dec;
+  const file     = state.fileDec;
+
+  if (!keyB64)   return showAlert('Carga el archivo de clave.');
+  if (!password) return showAlert('Ingresa la contraseña.');
+  if (!file)     return showAlert('Selecciona un archivo .mce para descifrar.');
+
+  setBtnLoading('decrypt', true);
+
+  const form = new FormData();
+  form.append('file', file);
+  form.append('password', password);
+  form.append('key_b64', keyB64);
+
+  try {
+    const res  = await fetch('/api/decrypt', { method:'POST', body:form });
+    const data = await res.json();
+
+    if (data.ok) {
+      showDecryptResult(data);
+    } else {
+      showDecryptError(data.error);
+    }
+  } catch(e) {
+    showDecryptError(e.message);
+  }
+
+  setBtnLoading('decrypt', false);
+}
+
+function showDecryptResult(data) {
+  const panel = document.getElementById('dec-result-panel');
+  panel.innerHTML = `
+    <div class="text-center w-full">
+      <div class="text-5xl mb-4">✅</div>
+      <p class="font-semibold text-emerald-300 mb-1">Descifrado exitoso</p>
+      <p class="text-xs text-slate-400 mono mb-4">${data.filename} · ${data.size} · ${data.time_ms} ms</p>
+      <button onclick="downloadB64('${data.plain_b64}','${data.filename}','application/octet-stream')"
+        class="btn-secondary px-6 py-3 rounded-xl text-sm font-semibold flex items-center gap-2 mx-auto">
+        ⬇️ Descargar archivo original
+      </button>
+    </div>`;
+}
+
+function showDecryptError(msg) {
+  const panel = document.getElementById('dec-result-panel');
+  panel.innerHTML = `
+    <div class="text-center w-full">
+      <div class="text-5xl mb-4">❌</div>
+      <p class="font-semibold text-red-400 mb-2">Descifrado fallido</p>
+      <p class="text-xs text-red-300/70 mono max-w-xs mx-auto">${msg}</p>
+    </div>`;
+}
+
+// ── Métricas ───────────────────────────────────────
+function updateMetrics(data) {
+  document.getElementById('m-entropy').textContent  = data.entropy + ' bits';
+  document.getElementById('m-avalanche').textContent = data.avalanche_pct + '%';
+  document.getElementById('m-time').textContent     = data.time_ms + ' ms';
+  document.getElementById('m-blocks').textContent   = data.blocks + ' bloques';
+  document.getElementById('m-orig').textContent     = data.original_size;
+  document.getElementById('m-cipher').textContent   = data.cipher_size;
+  document.getElementById('bar-entropy').style.width  = ((data.entropy / 8) * 100) + '%';
+  document.getElementById('bar-avalanche').style.width = data.avalanche_pct + '%';
+  const badge = document.getElementById('algo-badge');
+  badge.textContent = data.algo;
+  badge.classList.remove('hidden');
+}
+
+// ── Utilidades UI ──────────────────────────────────
+function setBtnLoading(which, loading) {
+  const icon = document.getElementById(which === 'encrypt' ? 'enc-btn-icon' : 'dec-btn-icon');
+  const text = document.getElementById(which === 'encrypt' ? 'enc-btn-text' : 'dec-btn-text');
+  const btn  = document.getElementById('btn-' + which);
+  if (loading) {
+    btn.disabled   = true;
+    icon.innerHTML = '<div class="spinner"></div>';
+    text.textContent = which === 'encrypt' ? 'Cifrando...' : 'Descifrando...';
+  } else {
+    btn.disabled   = false;
+    icon.textContent = which === 'encrypt' ? '🔒' : '🔓';
+    text.textContent = which === 'encrypt' ? 'Cifrar archivo' : 'Descifrar archivo';
+  }
+}
+
+function addLog(msg, color='slate') {
+  const log = document.getElementById('activity-log');
+  if (log.querySelector('p.italic')) log.innerHTML = '';
+  const colors = {
+    violet:'text-violet-300', emerald:'text-emerald-300',
+    cyan:'text-cyan-300', red:'text-red-400', slate:'text-slate-400'
+  };
+  const entry = document.createElement('div');
+  entry.className = 'log-entry flex gap-2 text-xs ' + (colors[color] || 'text-slate-400');
+  entry.innerHTML = `<span class="text-slate-600 mono flex-shrink-0">${new Date().toLocaleTimeString()}</span><span>${msg}</span>`;
+  log.prepend(entry);
+}
+
+function showAlert(msg) {
+  alert('⚠️ ' + msg);
+}
+
+function togglePass(id) {
+  const el = document.getElementById(id);
+  el.type = el.type === 'password' ? 'text' : 'password';
+}
+
+function humanSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes/1024).toFixed(1) + ' KB';
+  return (bytes/1048576).toFixed(1) + ' MB';
+}
+
+function fileIcon(name) {
+  const ext = name.split('.').pop().toLowerCase();
+  const map = {pdf:'📕',txt:'📝',jpg:'🖼',jpeg:'🖼',png:'🖼',mp4:'🎬',
+               mp3:'🎵',zip:'📦',py:'🐍',docx:'📘',xlsx:'📗',csv:'📊'};
+  return map[ext] || '📄';
+}
+
+function arrayBufferToB64(buf) {
+  let bin = '';
+  const bytes = new Uint8Array(buf);
+  for (let i = 0; i < bytes.byteLength; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
+function downloadB64(b64, filename, mime) {
+  const bin  = atob(b64);
+  const arr  = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  const blob = new Blob([arr], { type: mime });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ── ESTADO RED
+const net = { keyB64Srv: '', keyB64Cli: '', fileNet: null };
+let logInterval = null;
+const ALL_TABS = ['encrypt','decrypt','about','network'];
+
+function switchTab(tab) {
+  ALL_TABS.forEach(t => {
+    document.getElementById('panel-'+t).classList.add('hidden');
+    const btn = document.getElementById('tab-'+t);
+    if (btn) btn.className = btn.className.replace('tab-active','tab-inactive');
+  });
+  document.getElementById('panel-'+tab).classList.remove('hidden');
+  const active = document.getElementById('tab-'+tab);
+  if (active) active.className = active.className.replace('tab-inactive','tab-active');
+  if (tab === 'network') startLogPolling();
+  else stopLogPolling();
+}
+
+function loadSrvKey(input) {
+  const file = input.files[0]; if (!file) return;
+  const r = new FileReader();
+  r.onload = e => {
+    net.keyB64Srv = arrayBufferToB64(e.target.result);
+    document.getElementById('srv-key-text').textContent = file.name + ' (' + file.size + 'B)';
+    document.getElementById('srv-key-status').classList.remove('hidden');
+  };
+  r.readAsArrayBuffer(file);
+}
+
+function loadCliKey(input) {
+  const file = input.files[0]; if (!file) return;
+  const r = new FileReader();
+  r.onload = e => {
+    net.keyB64Cli = arrayBufferToB64(e.target.result);
+    document.getElementById('cli-key-text').textContent = file.name + ' (' + file.size + 'B)';
+    document.getElementById('cli-key-status').classList.remove('hidden');
+  };
+  r.readAsArrayBuffer(file);
+}
+
+function showFileNet(input) {
+  const f = input.files[0]; if (!f) return;
+  net.fileNet = f;
+  document.getElementById('file-net-name').textContent = f.name;
+  document.getElementById('file-net-size').textContent = humanSize(f.size);
+  document.getElementById('file-net-icon').textContent = fileIcon(f.name);
+  document.getElementById('file-net-info').classList.remove('hidden');
+  document.getElementById('drop-net').classList.add('hidden');
+}
+
+function clearFileNet() {
+  net.fileNet = null;
+  document.getElementById('file-net-info').classList.add('hidden');
+  document.getElementById('drop-net').classList.remove('hidden');
+  document.getElementById('file-net').value = '';
+}
+
+async function startServer() {
+  const password = document.getElementById('srv-password').value.trim();
+  const port     = document.getElementById('srv-port').value;
+  if (!net.keyB64Srv) return showAlert('Carga el archivo de clave del servidor.');
+  if (!password)      return showAlert('Ingresa la contrasena del servidor.');
+  document.getElementById('start-icon').innerHTML = '<div class="spinner"></div>';
+  document.getElementById('start-text').textContent = 'Iniciando...';
+  const res  = await fetch('/api/net/start_server', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ password, key_b64: net.keyB64Srv, port })
+  });
+  const data = await res.json();
+  if (data.ok) {
+    document.getElementById('srv-info').classList.remove('hidden');
+    document.getElementById('srv-ip-display').textContent   = data.ip;
+    document.getElementById('srv-port-display').textContent = data.port;
+    document.getElementById('btn-start-srv').disabled = true;
+    document.getElementById('btn-stop-srv').disabled  = false;
+    document.getElementById('btn-stop-srv').classList.remove('opacity-40');
+    document.getElementById('srv-running-badge').classList.remove('hidden');
+    document.getElementById('start-icon').textContent = 'V';
+    document.getElementById('start-text').textContent = 'Servidor corriendo';
+    startLogPolling();
+  } else {
+    showAlert(data.error);
+    document.getElementById('start-icon').textContent = 'P';
+    document.getElementById('start-text').textContent = 'Iniciar Servidor';
+  }
+}
+
+async function stopServer() {
+  await fetch('/api/net/stop_server', { method: 'POST' });
+  document.getElementById('btn-start-srv').disabled = false;
+  document.getElementById('btn-stop-srv').disabled  = true;
+  document.getElementById('btn-stop-srv').classList.add('opacity-40');
+  document.getElementById('srv-running-badge').classList.add('hidden');
+  document.getElementById('srv-info').classList.add('hidden');
+  document.getElementById('start-text').textContent = 'Iniciar Servidor';
+  stopLogPolling();
+}
+
+function startLogPolling() {
+  if (logInterval) return;
+  logInterval = setInterval(pollLog, 2000);
+  pollLog();
+}
+function stopLogPolling() {
+  if (logInterval) { clearInterval(logInterval); logInterval = null; }
+}
+
+async function pollLog() {
+  try {
+    const res  = await fetch('/api/net/server_log');
+    const data = await res.json();
+    if (!data.ok) return;
+    const logEl = document.getElementById('srv-log');
+    if (data.log.length > 0) {
+      logEl.innerHTML = data.log.slice().reverse().map(line => {
+        let cls = 'text-slate-400';
+        if (line.includes('OK') || line.includes('guardado')) cls = 'text-emerald-300';
+        else if (line.includes('Error') || line.includes('ERROR')) cls = 'text-red-400';
+        else if (line.includes('entrante') || line.includes('RECV')) cls = 'text-cyan-300';
+        return '<div class="log-entry ' + cls + '">' + line + '</div>';
+      }).join('');
+    }
+    const filesEl = document.getElementById('received-files');
+    if (data.files.length > 0) {
+      filesEl.innerHTML = data.files.map(f =>
+        '<div class="flex items-center gap-3 bg-white/5 rounded-lg px-3 py-2">' +
+        '<span class="text-lg">' + fileIcon(f.name) + '</span>' +
+        '<div class="flex-1 min-w-0">' +
+        '<p class="text-sm font-medium truncate">' + f.name + '</p>' +
+        '<p class="text-xs text-slate-400">' + f.size + '</p></div>' +
+        '<a href="/api/net/download_received/' + encodeURIComponent(f.name) + '" ' +
+        'class="text-xs bg-violet-600/40 hover:bg-violet-600/60 px-3 py-1 rounded-lg transition-all">Descargar</a>' +
+        '</div>'
+      ).join('');
+    } else {
+      filesEl.innerHTML = '<p class="text-xs text-slate-600 italic">Ningun archivo recibido aun...</p>';
+    }
+  } catch(e) {}
+}
+
+async function sendFile() {
+  const host     = document.getElementById('cli-host').value.trim();
+  const port     = document.getElementById('cli-port').value;
+  const password = document.getElementById('cli-password').value.trim();
+  if (!host)          return showAlert('Ingresa la IP o host del servidor.');
+  if (!net.keyB64Cli) return showAlert('Carga el archivo de clave del cliente.');
+  if (!password)      return showAlert('Ingresa la contrasena.');
+  if (!net.fileNet)   return showAlert('Selecciona un archivo para enviar.');
+
+  document.getElementById('btn-send').disabled = true;
+  document.getElementById('send-icon').innerHTML = '<div class="spinner"></div>';
+  document.getElementById('send-text').textContent = 'Cifrando y enviando...';
+  document.getElementById('send-result').classList.add('hidden');
+
+  const form = new FormData();
+  form.append('file',     net.fileNet);
+  form.append('host',     host);
+  form.append('port',     port);
+  form.append('password', password);
+  form.append('key_b64',  net.keyB64Cli);
+
+  try {
+    const res  = await fetch('/api/net/send_file', { method: 'POST', body: form });
+    const data = await res.json();
+    const panel = document.getElementById('send-result');
+    panel.classList.remove('hidden');
+    if (data.ok) {
+      document.getElementById('send-result-icon').textContent  = 'OK';
+      document.getElementById('send-result-title').textContent = 'Archivo enviado exitosamente';
+      document.getElementById('send-result-title').className   = 'font-semibold mb-1 text-emerald-300';
+      document.getElementById('send-result-body').innerHTML    =
+        '<p>Guardado como: <span class="text-violet-300">' + data.saved_as + '</span></p>' +
+        '<p>Original: ' + data.orig_size + ' | Cifrado: ' + data.enc_size + '</p>' +
+        '<p>Cifrado: ' + data.enc_ms + ' ms | Envio: ' + data.send_ms + ' ms</p>';
+      addLog('Archivo enviado a ' + host + ':' + port + ' -> ' + data.saved_as, 'cyan');
+    } else {
+      document.getElementById('send-result-icon').textContent  = 'X';
+      document.getElementById('send-result-title').textContent = 'Error al enviar';
+      document.getElementById('send-result-title').className   = 'font-semibold mb-1 text-red-400';
+      document.getElementById('send-result-body').innerHTML    = '<p class="text-red-300">' + data.error + '</p>';
+    }
+  } catch(e) {
+    document.getElementById('send-result').classList.remove('hidden');
+    document.getElementById('send-result-icon').textContent  = 'X';
+    document.getElementById('send-result-title').textContent = 'Error de conexion';
+    document.getElementById('send-result-body').innerHTML    = '<p class="text-red-300">' + e.message + '</p>';
+  }
+  document.getElementById('btn-send').disabled = false;
+  document.getElementById('send-icon').textContent = 'Send';
+  document.getElementById('send-text').textContent = 'Cifrar y Enviar';
+}
+
+</script>
+</body>
+</html>

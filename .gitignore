@@ -1,0 +1,35 @@
+# Entorno virtual
+venv/
+
+# Archivos de clave MCE (nunca subir al repo)
+*.mce.key
+secret.mce.key
+
+# Archivos cifrados
+*.mce
+
+# Carpetas de archivos subidos/descargados
+web/uploads/
+web/downloads/
+web/recibidos/
+network/recibidos/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# Variables de entorno
+.env
+.env.local
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
